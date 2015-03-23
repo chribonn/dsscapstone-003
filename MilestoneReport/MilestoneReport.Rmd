@@ -1,0 +1,274 @@
+---
+title: "Online Text Exploration"
+author: "Alan C. Bonnici"
+date: "March 2015"
+output: html_document
+---
+
+# Introduction
+
+The purpose of this document is to initiate the process that will lead to the create of an Natural Language Processing (NLP) tool that predicts the next word in a sentence being typed. Most smartphones come with such functionality. In fact [Swiftkey](http://swiftkey.com/en/) a company that produces one such keyboard for smartphones is involved in this project.
+
+# The Data
+
+Data for this project was sourced from a corpus called [HC Corpora](www.corpora.heliohost.org). Only the english language corpus was processed. The enlish language corpus consisted of three text files:
+ * Blogs posts
+ * News articles
+ * Twitter messages
+
+The data had to be cleaned of offensive and profane words. An balance had to be reached to ensure that words that have a dual meaning (eg balls or penis) are not removed. I took a decision in favour of retaining words that have dual meanings, removing only clearly offensive words.
+
+## Loading Data
+
+The following is some basic information about the raw text files that will be processed:
+ * File size of Blogs file `r file.info("final/en_US/en_US.blogs.txt")$size   / 1024^2`Mb.
+ * File size of News file `r file.info("final/en_US/en_US.news.txt")$size   / 1024^2`Mb.
+ * File size of Twitter file `r file.info("final/en_US/en_US.twitter.txt")$size   / 1024^2`Mb.
+
+```{r, warning = FALSE, message=FALSE, echo=FALSE}
+Sys.setenv(JAVA_HOME='C:\\Program Files\\Java\\jdk1.7.0_05\\jre')
+library(stringi)
+library(tm)
+library(SnowballC)
+library(wordcloud)
+library(RColorBrewer)
+library(slam)
+library(RWeka)
+
+# allows code to be reproduced
+set.seed(1234)
+
+fileRData <- "data/dsscapstone-003-001.RData"
+
+# Prepare the directory
+if (!file.exists("data")) {
+    dir.create("data")
+}
+
+if (!file.exists(fileRData)) {
+    fileUrl <- "https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip"
+    zipFile <- paste0("data/",basename(fileUrl))
+    download.file(fileUrl, zipFile)
+    
+    # extract the contents of the downloaded archive
+    unzip(zipFile)
+    
+    # cleanup the folder that will not be used in this analysis
+    unlink("final/de_DE", recursive = TRUE)
+    unlink("final/fi_FI", recursive = TRUE)
+    unlink("final/ru_RU", recursive = TRUE)
+
+    # Load the profane words
+    profaneWords <- readLines("data/profane.txt", encoding="UTF-8")
+    profaneV <- paste(profaneWords, collapse='|')
+             
+    # load the data en_US data
+    #ignore 'incomplete final line found' warning - all lines have been loaded
+    # the nul error can be sorted by reading the file as binary
+    # import the news dataset in binary mode
+    con <- file("final/en_US/en_US.news.txt", open="rb")
+    dataNews <- readLines(con, encoding="UTF-8")
+    close(con)
+    rm(con)
+    # clean up profane words
+    dataNews <- gsub(profaneV, " ", dataNews)
+    
+    dataBlogs <- readLines("final/en_US/en_US.blogs.txt", encoding="UTF-8")
+    # clean up profane words
+    dataBlogs <- gsub(profaneV, " ", dataBlogs)
+    
+    dataTwitter <- readLines("final/en_US/en_US.twitter.txt", encoding="UTF-8")
+    # remove characters that are not UTF-8
+    dataTwitter <- iconv(dataTwitter, from="latin1", to="UTF-8", sub="byte")
+    dataTwitter <- stri_replace_all_regex(dataTwitter, "\u2019|`", "'")
+    dataTwitter <- stri_replace_all_regex(dataTwitter, "\u201c|\u201d|u201f|``", '"')
+    # clean up profane words
+    dataTwitter <- gsub(profaneV, " ", dataTwitter)
+    
+    # record the date the archive was downloaded
+    dateDownloaded <- date()
+    save(dateDownloaded, dataNews, dataBlogs, dataTwitter, file = fileRData)        
+} else {
+    load(file=fileRData)
+}
+```
+The data was originally downloaded on the ```r dateDownloaded```.
+
+In order to reduce processing time the source file loading and profanity cleanup is done once and the intermediate files are loaded automatically the second time round. Once needs to remove the file `r fileRData` so that the process is run from the begining.
+
+Information about the data that will be used (profanity words removed):
+
+```{r, warning = FALSE, message=FALSE, echo=FALSE}
+lenB <- length(dataBlogs)
+lenN <- length(dataNews)
+lenT <- length(dataTwitter)
+
+wrdB <- sum(sapply(gregexpr("\\W+", dataBlogs), length) + 1)
+wrdN <- sum(sapply(gregexpr("\\W+", dataNews), length) + 1)
+wrdT <- sum(sapply(gregexpr("\\W+", dataTwitter), length) + 1)
+
+avgB <- wrdB %/% lenB
+avgN <- wrdN %/% lenN
+avgT <- wrdT %/% lenT
+```
+
+Text Source | Lines | Words | Average Words
+----------- | ----- | -----
+Blogs | `r lenB` | `r wrdB` | `r avgB`
+News | `r lenN` | `r wrdN` | `r avgN`
+Twitter | `r lenT` | `r wrdT` | `r avgT`
+
+```{r}
+barplot(c(avgB, avgN, avgT), border="tan2", names.arg=c("Blogs", "News", "Twitter"), ylab="Words per line", xlab="Source", main="Average Words / Posting")
+
+#cleanup
+rm (lenB, wrdB, avgB, lenN, wrdN, avgN, lenT, wrdT, avgT)
+```
+
+## Cleaning the Corpora
+
+The code below cleans the corpora and take a sample of the data.
+
+```{r}
+# https://stackoverflow.com/questions/24191728/documenttermmatrix-error-on-corpus-argument
+# https://stackoverflow.com/questions/24311561/how-to-use-stemdocument-in-r
+# Function clean up the passed parameter leaving a cleaned up text
+CleanUp <- function (corpus) {
+    corpus <- tm_map(corpus, tolower)  
+    corpus <- tm_map(corpus, removePunctuation)
+    corpus <- tm_map(corpus, stripWhitespace)
+    corpus <- tm_map(corpus, removeNumbers)
+    corpus <- tm_map(corpus, removeWords,stopwords("english"))
+    corpus <- tm_map(corpus, PlainTextDocument)
+    corpus <- tm_map(corpus, stemDocument)
+    
+    return (corpus)
+}
+
+dataBlogs <- sample(dataBlogs, 1000)
+dataNews <- sample(dataNews, 1000)
+dataTwitter <- sample(dataTwitter, 1000)
+
+corpusBlogs <- Corpus(VectorSource(dataBlogs))
+corpusNews <- Corpus(VectorSource(dataNews))
+corpusTwitter <- Corpus(VectorSource(dataTwitter))
+
+# cleanup 
+rm (dataBlogs, dataNews, dataTwitter)
+
+corpusData <- list(corpusBlogs, corpusNews, corpusTwitter)
+
+# cleanup 
+rm (corpusBlogs, corpusNews, corpusTwitter)
+
+# Clean up the data
+for (i in 1: length(corpusData))
+{
+    corpusData[[i]] <- CleanUp(corpusData[[i]])
+}
+
+```
+
+## Word Cloud
+
+The word cloud give an idea of the most popular words in the corpus.
+
+```{r, warning = FALSE}
+par(mfrow = c(1,3))
+Titles <- c("Blogs", "News", "Twitter")
+
+for(i in 1:3){
+    tdm <- DocumentTermMatrix(corpusData[[i]])
+    # plot word cloud
+    wordcloud(words=colnames(tdm), freq=col_sums(tdm), scale=c(5,0.5), max.words=100, random.order=FALSE, rot.per=0.35, use.r.layout=FALSE, colors=brewer.pal(8,"Dark2"))
+    title(Titles[i])
+}
+
+# cleanup
+rm (tdm)
+```
+
+## n-Grams
+
+Various n-Gram charts of the differt text sources. In order to ensure the readability of the different charts only the first 25 tokens of each are shown.
+
+```{r}
+# Calculate word freqencies
+for(i in 1:3) {
+    tdm <- TermDocumentMatrix(corpusData[[i]])
+    wordFreq <- findFreqTerms(tdm, lowfreq=200)
+    print (paste0("Word frequency for ", Titles[i]))
+    print (wordFreq[1:20])
+}
+
+# CleanUp
+rm (tdm, wordFreq)
+```
+
+```{r}
+UnigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min=1, max=1))
+par(mfrow = c(3,1))
+for(i in 1:3) {
+    # For each item compute an analysis of different token lengths
+    dtm <- DocumentTermMatrix(corpusData[[i]], control=list(tokenize=UnigramTokenizer))
+    freq <- sort(colSums(as.matrix(dtm)), decreasing=TRUE)[1:25]
+    
+    bar <- barplot(freq, axes=FALSE, axisnames=FALSE, ylab="Frequency", main=paste0("Frequency of 1-Grams  for ",Titles[i]))
+    text(bar, par("usr")[3], labels=names(freq), srt=60, adj=c(1.1,1.1), xpd=TRUE, cex=0.9)
+    axis(2)
+}
+```
+
+```{r}
+BigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min=2, max=2))
+par(mfrow = c(3,1))
+for(i in 1:3) {
+    # For each item compute an analysis of different token lengths
+    dtm <- DocumentTermMatrix(corpusData[[i]], control=list(tokenize=BigramTokenizer))
+    freq <- sort(colSums(as.matrix(dtm)), decreasing=TRUE)[1:25]
+    
+    bar <- barplot(freq, axes=FALSE, axisnames=FALSE, ylab="Frequency", main=paste0("Frequency of 2-Grams for ",Titles[i]))
+    text(bar, par("usr")[3], labels=names(freq), srt=60, adj=c(1.1,1.1), xpd=TRUE, cex=0.9)
+    axis(2)
+}
+```
+
+```{r}
+TrigramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min=3, max=3))
+par(mfrow = c(3,1))
+for(i in 1:3) {
+    # For each item compute an analysis of different token lengths
+    dtm <- DocumentTermMatrix(corpusData[[i]], control=list(tokenize=TrigramTokenizer))
+    freq <- sort(colSums(as.matrix(dtm)), decreasing=TRUE)[1:25]
+    
+    bar <- barplot(freq, axes=FALSE, axisnames=FALSE, ylab="Frequency", main=paste0("Frequency of 3-Grams for ",Titles[i]))
+    text(bar, par("usr")[3], labels=names(freq), srt=60, adj=c(1.1,1.1), xpd=TRUE, cex=0.9)
+    axis(2)
+}
+```
+
+```{r}
+QurgramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min=4, max=4))
+par(mfrow = c(3,1))
+for(i in 1:3) {
+    # For each item compute an analysis of different token lengths
+    dtm <- DocumentTermMatrix(corpusData[[i]], control=list(tokenize=QurgramTokenizer))
+    freq <- sort(colSums(as.matrix(dtm)), decreasing=TRUE)[1:25]
+    
+    bar <- barplot(freq, axes=FALSE, axisnames=FALSE, ylab="Frequency", main=paste0("Frequency of 4-Grams for ",Titles[i]))
+    text(bar, par("usr")[3], labels=names(freq), srt=60, adj=c(1.1,1.1), xpd=TRUE, cex=0.9)
+    axis(2)
+}
+
+rm (dtm, freq, bar)
+```
+
+It can be observed that while some words are common to all sources, each source seems to have its own style of writing.
+
+## Tasks that need to be accomplished
+
+This data will be used to create the NLP algorithm. The general steps that need to be performed are the following:
+
+1. Take a sample of the data that will be used for testing and to build a model. This is also necessary because the algorith must operate in a *reasonable amount of time* and computer resources are limited. 
+2. Build the prediction algorithms
+3. Went the algorithm has been fine tuned develop and publish a shiny app.
